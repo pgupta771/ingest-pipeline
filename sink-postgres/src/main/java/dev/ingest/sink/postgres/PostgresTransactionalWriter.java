@@ -17,6 +17,7 @@ import java.util.stream.Collectors;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,17 +28,22 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class PostgresTransactionalWriter {
 
+    public static final String DLQ_TOPIC = "ingest.dlq";
+
     private final JdbcTemplate jdbcTemplate;
     private final SchemaManager schemaManager;
+    private final KafkaTemplate<String, String> kafkaTemplate;
     private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public PostgresTransactionalWriter(
             JdbcTemplate jdbcTemplate,
             SchemaManager schemaManager,
+            KafkaTemplate<String, String> kafkaTemplate,
             MeterRegistry meterRegistry) {
         this.jdbcTemplate = jdbcTemplate;
         this.schemaManager = schemaManager;
+        this.kafkaTemplate = kafkaTemplate;
         this.meterRegistry = meterRegistry;
     }
 
@@ -59,16 +65,18 @@ public class PostgresTransactionalWriter {
 
         for (SourceRecord record : rawRecords) {
             SchemaDecision.SendToDlq rejection = null;
+            List<SchemaDecision> pendingEvolutions = new ArrayList<>();
+
+            // Pass 1: Validate all fields first so a rejected record never alters the table schema
             for (Map.Entry<String, Object> field : record.payload().entrySet()) {
                 SchemaDecision decision = schemaManager.evaluateField(
                         schemaColumns, field.getKey(), field.getValue());
-                if (decision instanceof SchemaDecision.AddColumn
-                        || decision instanceof SchemaDecision.WidenColumn) {
-                    schemaManager.applySchemaChange(stream, decision);
-                    schemaColumns = new LinkedHashMap<>(schemaManager.ensureStreamTableInitialized(stream));
-                } else if (decision instanceof SchemaDecision.SendToDlq dlq) {
+                if (decision instanceof SchemaDecision.SendToDlq dlq) {
                     rejection = dlq;
                     break;
+                } else if (decision instanceof SchemaDecision.AddColumn
+                        || decision instanceof SchemaDecision.WidenColumn) {
+                    pendingEvolutions.add(decision);
                 }
             }
 
@@ -78,11 +86,16 @@ public class PostgresTransactionalWriter {
                         record.primaryKey(),
                         rejection.reasonCode(),
                         rejection.reasonDetail(),
-                         toJsonSafe(record),
+                        toJsonSafe(record),
                         "ingest.raw." + stream,
                         0,
                         -1L));
             } else {
+                // Pass 2: Apply safe schema evolutions for valid record
+                for (SchemaDecision evolution : pendingEvolutions) {
+                    schemaManager.applySchemaChange(stream, evolution);
+                    schemaColumns = new LinkedHashMap<>(schemaManager.ensureStreamTableInitialized(stream));
+                }
                 // In-batch compaction: keep latest record per PK so ON CONFLICT DO UPDATE never sees duplicate PKs
                 deduplicatedByPk.put(record.primaryKey(), record);
             }
@@ -99,6 +112,7 @@ public class PostgresTransactionalWriter {
 
         if (!allDeadLetters.isEmpty()) {
             batchInsertDeadLetters(allDeadLetters);
+            publishDeadLettersToKafka(allDeadLetters);
             Counter.builder("ingest_records_dead_total")
                     .tag("stream", stream)
                     .register(meterRegistry)
@@ -209,6 +223,13 @@ public class PostgresTransactionalWriter {
                 return entries.size();
             }
         });
+    }
+
+    private void publishDeadLettersToKafka(List<DeadLetterEntry> entries) {
+        for (DeadLetterEntry entry : entries) {
+            String key = entry.primaryKey() != null ? entry.primaryKey() : "UNKNOWN";
+            kafkaTemplate.send(DLQ_TOPIC, key, toJsonSafe(entry));
+        }
     }
 
     private void upsertConsumerOffsets(Map<TopicPartition, Long> nextOffsets) {
