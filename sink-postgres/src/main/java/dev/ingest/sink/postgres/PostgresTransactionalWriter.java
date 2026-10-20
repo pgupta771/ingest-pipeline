@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
@@ -20,10 +21,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Executes schema evolution, in-batch deduplicated upserts, dead-letter persistence,
- * and Kafka consumer offset commits inside a single atomic PostgreSQL transaction.
+ * sync_runs counter updates, and Kafka consumer offset commits inside a single PostgreSQL transaction.
  */
 @Service
 public class PostgresTransactionalWriter {
@@ -48,22 +51,22 @@ public class PostgresTransactionalWriter {
     }
 
     /**
-     * Atomically processes a batch of records for a stream and commits the consumed Kafka offsets.
+     * Atomically processes a batch of consumed record envelopes for a stream and commits the Kafka offsets.
      */
     @Transactional
     public void writeBatchTransactionally(
             String stream,
-            List<SourceRecord> rawRecords,
+            List<ConsumedRecordEnvelope> rawEnvelopes,
             List<DeadLetterEntry> preParsedDeadLetters,
             Map<TopicPartition, Long> nextOffsets) {
 
-        Map<String, ColumnType> schemaColumns = new LinkedHashMap<>(
-                schemaManager.ensureStreamTableInitialized(stream));
+        Map<String, ColumnType> schemaColumns = schemaManager.ensureStreamTableInitialized(stream);
 
         List<DeadLetterEntry> allDeadLetters = new ArrayList<>(preParsedDeadLetters);
         Map<String, SourceRecord> deduplicatedByPk = new LinkedHashMap<>();
 
-        for (SourceRecord record : rawRecords) {
+        for (ConsumedRecordEnvelope env : rawEnvelopes) {
+            SourceRecord record = env.record();
             SchemaDecision.SendToDlq rejection = null;
             List<SchemaDecision> pendingEvolutions = new ArrayList<>();
 
@@ -87,16 +90,15 @@ public class PostgresTransactionalWriter {
                         rejection.reasonCode(),
                         rejection.reasonDetail(),
                         toJsonSafe(record),
-                        "ingest.raw." + stream,
-                        0,
-                        -1L));
+                        env.kafkaTopic(),
+                        env.kafkaPartition(),
+                        env.kafkaOffset()));
             } else {
                 // Pass 2: Apply safe schema evolutions for valid record
                 for (SchemaDecision evolution : pendingEvolutions) {
                     schemaManager.applySchemaChange(stream, evolution);
-                    schemaColumns = new LinkedHashMap<>(schemaManager.ensureStreamTableInitialized(stream));
+                    schemaColumns = schemaManager.ensureStreamTableInitialized(stream);
                 }
-                // In-batch compaction: keep latest record per PK so ON CONFLICT DO UPDATE never sees duplicate PKs
                 deduplicatedByPk.put(record.primaryKey(), record);
             }
         }
@@ -112,13 +114,14 @@ public class PostgresTransactionalWriter {
 
         if (!allDeadLetters.isEmpty()) {
             batchInsertDeadLetters(allDeadLetters);
-            publishDeadLettersToKafka(allDeadLetters);
+            publishDeadLettersAfterCommit(allDeadLetters);
             Counter.builder("ingest_records_dead_total")
                     .tag("stream", stream)
                     .register(meterRegistry)
                     .increment(allDeadLetters.size());
         }
 
+        updateSyncRunCounters(stream, validRecords.size(), allDeadLetters.size());
         upsertConsumerOffsets(nextOffsets);
     }
 
@@ -203,6 +206,7 @@ public class PostgresTransactionalWriter {
                 INSERT INTO dead_letters
                     (stream, pk, reason_code, reason_detail, raw_payload, kafka_topic, kafka_partition, kafka_offset)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (kafka_topic, kafka_partition, kafka_offset) DO NOTHING
                 """;
         jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
             @Override
@@ -225,11 +229,47 @@ public class PostgresTransactionalWriter {
         });
     }
 
-    private void publishDeadLettersToKafka(List<DeadLetterEntry> entries) {
-        for (DeadLetterEntry entry : entries) {
-            String key = entry.primaryKey() != null ? entry.primaryKey() : "UNKNOWN";
-            kafkaTemplate.send(DLQ_TOPIC, key, toJsonSafe(entry));
+    private void publishDeadLettersAfterCommit(List<DeadLetterEntry> entries) {
+        Runnable sendTask = () -> {
+            List<CompletableFuture<?>> futures = new ArrayList<>(entries.size());
+            for (DeadLetterEntry entry : entries) {
+                String key = entry.primaryKey() != null ? entry.primaryKey() : "UNKNOWN";
+                futures.add(kafkaTemplate.send(DLQ_TOPIC, key, toJsonSafe(entry)));
+            }
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
+        };
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    sendTask.run();
+                }
+            });
+        } else {
+            sendTask.run();
         }
+    }
+
+    private void updateSyncRunCounters(String stream, int loadedDelta, int deadDelta) {
+        if (loadedDelta == 0 && deadDelta == 0) {
+            return;
+        }
+        jdbcTemplate.update(
+                """
+                UPDATE sync_runs
+                SET records_loaded = records_loaded + ?,
+                    records_dead   = records_dead + ?
+                WHERE id = (
+                    SELECT id FROM sync_runs
+                    WHERE stream = ?
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                )
+                """,
+                loadedDelta,
+                deadDelta,
+                stream);
     }
 
     private void upsertConsumerOffsets(Map<TopicPartition, Long> nextOffsets) {

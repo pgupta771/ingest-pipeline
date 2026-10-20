@@ -80,7 +80,7 @@ public class KafkaBatchSinkConsumer implements ConsumerSeekAware {
         }
 
         Timer.Sample sample = Timer.start(meterRegistry);
-        Map<String, List<SourceRecord>> byStream = new LinkedHashMap<>();
+        Map<String, List<ConsumedRecordEnvelope>> byStream = new LinkedHashMap<>();
         Map<String, List<DeadLetterEntry>> deadByStream = new LinkedHashMap<>();
         Map<String, Map<TopicPartition, Long>> offsetsByStream = new HashMap<>();
 
@@ -93,7 +93,8 @@ public class KafkaBatchSinkConsumer implements ConsumerSeekAware {
 
             try {
                 SourceRecord parsed = objectMapper.readValue(cr.value(), SourceRecord.class);
-                byStream.computeIfAbsent(stream, k -> new ArrayList<>()).add(parsed);
+                byStream.computeIfAbsent(stream, k -> new ArrayList<>())
+                        .add(new ConsumedRecordEnvelope(parsed, cr.topic(), cr.partition(), cr.offset()));
             } catch (Exception e) {
                 deadByStream.computeIfAbsent(stream, k -> new ArrayList<>()).add(
                         new DeadLetterEntry(
