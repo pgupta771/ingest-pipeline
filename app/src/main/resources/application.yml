@@ -5,7 +5,7 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ingest}
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ingest?reWriteBatchedInserts=true}
     username: ${POSTGRES_USER:ingest}
     password: ${POSTGRES_PASSWORD:ingest}
   flyway:
@@ -15,6 +15,8 @@ spring:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       acks: all
+      batch-size: 65536
+      linger-ms: 5
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
@@ -23,8 +25,11 @@ spring:
       group-id: ingest-postgres-loader
       enable-auto-commit: false
       auto-offset-reset: earliest
+      max-poll-records: 5000
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        metadata.max.age.ms: 1000
 
 management:
   endpoints:
