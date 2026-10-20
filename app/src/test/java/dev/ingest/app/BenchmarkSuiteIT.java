@@ -11,6 +11,7 @@ import dev.ingest.engine.FaultInjectionHook;
 import dev.ingest.engine.SyncMode;
 import dev.ingest.sink.postgres.ConsumedRecordEnvelope;
 import dev.ingest.sink.postgres.PostgresTransactionalWriter;
+import dev.ingest.sink.postgres.SchemaManager;
 import java.io.BufferedWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -70,6 +71,9 @@ class BenchmarkSuiteIT {
 
     @Autowired
     private PostgresTransactionalWriter writer;
+
+    @Autowired
+    private SchemaManager schemaManager;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -153,6 +157,7 @@ class BenchmarkSuiteIT {
     private long measureBatchSize(List<ConsumedRecordEnvelope> records, int batchSize) {
         jdbcTemplate.execute("DROP TABLE IF EXISTS rdw_vehicles");
         jdbcTemplate.execute("DELETE FROM stream_schema WHERE stream = 'rdw_vehicles'");
+        schemaManager.evictCache("rdw_vehicles");
         long startNs = System.nanoTime();
         for (int i = 0; i < records.size(); i += batchSize) {
             List<ConsumedRecordEnvelope> slice = records.subList(i, Math.min(records.size(), i + batchSize));
