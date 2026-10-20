@@ -1,0 +1,56 @@
+{
+  "title": "Resumable Ingestion Pipeline",
+  "uid": "ingest-pipeline-main",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Throughput: Extracted vs Loaded (records/sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(ingest_records_extracted_total[1m])", "legendFormat": "Extracted ({{stream}})" },
+        { "expr": "rate(ingest_records_loaded_total[1m])", "legendFormat": "Loaded ({{stream}})" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Consumer Lag & Dead Letters",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "ingest_consumer_lag", "legendFormat": "Consumer Lag" },
+        { "expr": "ingest_records_dead_total", "legendFormat": "Dead Letters ({{stream}})" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Checkpoint Age (seconds)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "ingest_checkpoint_age_seconds", "legendFormat": "Checkpoint Age (s)" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Batch Write Duration (p95 seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        { "expr": "rate(ingest_batch_duration_seconds_sum[1m]) / rate(ingest_batch_duration_seconds_count[1m])", "legendFormat": "Avg Batch Latency (s)" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Upstream Retries Total",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        { "expr": "ingest_retries_total", "legendFormat": "Retries" }
+      ]
+    }
+  ]
+}

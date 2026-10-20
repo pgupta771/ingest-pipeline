@@ -18,6 +18,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -73,6 +74,9 @@ public class ExtractionOrchestrator implements SmartLifecycle {
                 .tag("stream", stream)
                 .register(meterRegistry);
 
+        MDC.put("run_id", runId.toString());
+        MDC.put("stream", stream);
+
         log.info("Starting sync runId={} connector={} stream={} mode={} startCursor={}",
                 runId, connectorId, stream, mode, startCursor.map(Cursor::value).orElse("<BEGIN>"));
 
@@ -85,6 +89,7 @@ public class ExtractionOrchestrator implements SmartLifecycle {
                 List<SourceRecord> records = page.records();
                 if (!records.isEmpty()) {
                     pageNumber++;
+                    MDC.put("batch_id", String.valueOf(pageNumber));
                     publishPageAndAwaitAcks(topic, records);
                     totalPublished += records.size();
                     extractedCounter.increment(records.size());
@@ -107,6 +112,10 @@ public class ExtractionOrchestrator implements SmartLifecycle {
             log.error("Sync failed runId={} stream={}: {}", runId, stream, e.getMessage(), e);
             checkpointRepository.markSyncFailed(runId, e.getMessage());
             throw e;
+        } finally {
+            MDC.remove("run_id");
+            MDC.remove("stream");
+            MDC.remove("batch_id");
         }
 
         return checkpointRepository.findSyncRun(runId).orElseThrow();
