@@ -4,7 +4,7 @@ set -euo pipefail
 # M3 Headline Crash-Recovery Proof Script
 # Starts the Spring Boot ingestion pipeline in fixture mode, repeatedly sends SIGKILL (kill -9)
 # at random moments during sync, restarts with mode=RESUME until complete, and verifies
-# 0 duplicates, 0 gaps, and exact MD5 content checksum across 10 consecutive runs.
+# 0 lost rows, identical checksum, idempotent replay, and exact MD5 content checksum across 10 consecutive runs.
 
 RUNS="${RUNS:-10}"
 FIXTURE_RECORDS="${FIXTURE_RECORDS:-50000}"
@@ -21,6 +21,7 @@ docker compose -f deploy/docker-compose.yml up -d postgres kafka
 
 echo "[kill-and-resume] Waiting for PostgreSQL and Kafka to become healthy..."
 until docker exec ingest-postgres pg_isready -U ingest -d ingest >/dev/null 2>&1; do sleep 1; done
+until docker exec ingest-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1; do sleep 1; done
 
 start_app() {
   java -Xmx512m -jar "$APP_JAR" \
@@ -94,8 +95,8 @@ for run in $(seq 1 "$RUNS"); do
     exit 1
   fi
 
-  echo "[Run $run/$RUNS] PASS: rows=$FINAL_COUNT (0 duplicates, 0 gaps), md5=$CHECKSUM"
+  echo "[Run $run/$RUNS] PASS: rows=$FINAL_COUNT (0 lost rows, identical checksum, idempotent replay), md5=$CHECKSUM"
 done
 
 echo "================================================================"
-echo "ALL $RUNS CONSECUTIVE KILL-AND-RESUME RUNS PASSED (0 duplicates, 0 gaps)!"
+echo "ALL $RUNS CONSECUTIVE KILL-AND-RESUME RUNS PASSED (0 lost rows, identical checksum, idempotent replay)!"
