@@ -18,9 +18,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Manages target PostgreSQL table creation and online schema evolution (`stream_schema` & `schema_events`).
+ * Evicts the in-memory schema cache automatically if an enclosing database transaction rolls back.
  */
 @Component
 public class SchemaManager {
@@ -39,16 +42,21 @@ public class SchemaManager {
         this.connectorRegistry = connectorRegistry;
     }
 
+    public synchronized void evictCache(String stream) {
+        schemaCache.remove(stream);
+    }
+
     /**
      * Ensures the physical PostgreSQL table and `stream_schema` metadata row exist for `stream`.
      */
     public synchronized Map<String, ColumnType> ensureStreamTableInitialized(String stream) {
         Map<String, ColumnType> cached = schemaCache.get(stream);
         if (cached != null) {
-            return cached;
+            return new LinkedHashMap<>(cached);
         }
 
         validateIdentifier(stream);
+        registerRollbackEvictionIfTransactional(stream);
         SchemaDescriptor descriptor = findDescriptor(stream);
 
         List<String> existingJson = jdbcTemplate.query(
@@ -77,7 +85,7 @@ public class SchemaManager {
         }
 
         schemaCache.put(stream, new LinkedHashMap<>(columns));
-        return schemaCache.get(stream);
+        return new LinkedHashMap<>(columns);
     }
 
     /**
@@ -120,10 +128,12 @@ public class SchemaManager {
 
     /**
      * Applies an {@link SchemaDecision.AddColumn} or {@link SchemaDecision.WidenColumn} DDL change.
+     * Evicts the cache automatically if the surrounding transaction rolls back.
      */
     public synchronized void applySchemaChange(String stream, SchemaDecision decision) {
         validateIdentifier(stream);
-        Map<String, ColumnType> columns = new LinkedHashMap<>(ensureStreamTableInitialized(stream));
+        registerRollbackEvictionIfTransactional(stream);
+        Map<String, ColumnType> columns = ensureStreamTableInitialized(stream);
 
         switch (decision) {
             case SchemaDecision.AddColumn add -> {
@@ -159,6 +169,19 @@ public class SchemaManager {
             }
             default -> {
             }
+        }
+    }
+
+    private void registerRollbackEvictionIfTransactional(String stream) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                        evictCache(stream);
+                    }
+                }
+            });
         }
     }
 
