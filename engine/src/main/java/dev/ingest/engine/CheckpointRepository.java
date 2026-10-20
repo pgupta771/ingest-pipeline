@@ -4,7 +4,6 @@ import dev.ingest.core.Cursor;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -74,6 +73,12 @@ public class CheckpointRepository {
     public void markSyncCompleted(UUID runId) {
         jdbcTemplate.update(
                 "UPDATE sync_runs SET status = 'COMPLETED', finished_at = NOW() WHERE id = ?",
+                runId);
+    }
+
+    public void markSyncInterrupted(UUID runId) {
+        jdbcTemplate.update(
+                "UPDATE sync_runs SET status = 'INTERRUPTED', finished_at = NOW() WHERE id = ?",
                 runId);
     }
 

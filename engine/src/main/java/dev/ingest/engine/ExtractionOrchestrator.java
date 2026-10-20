@@ -82,6 +82,7 @@ public class ExtractionOrchestrator implements SmartLifecycle {
 
         int pageNumber = 0;
         long totalPublished = 0L;
+        boolean streamExhausted = false;
 
         try (SourceSession session = connector.openSession(stream, startCursor)) {
             while (running.get()) {
@@ -103,11 +104,18 @@ public class ExtractionOrchestrator implements SmartLifecycle {
                 }
 
                 if (!page.hasMore()) {
+                    streamExhausted = true;
                     break;
                 }
             }
-            checkpointRepository.markSyncCompleted(runId);
-            log.info("Completed sync runId={} stream={} totalPublished={}", runId, stream, totalPublished);
+
+            if (streamExhausted) {
+                checkpointRepository.markSyncCompleted(runId);
+                log.info("Completed sync runId={} stream={} totalPublished={}", runId, stream, totalPublished);
+            } else {
+                checkpointRepository.markSyncInterrupted(runId);
+                log.info("Interrupted sync runId={} stream={} after page={}", runId, stream, pageNumber);
+            }
         } catch (Exception e) {
             log.error("Sync failed runId={} stream={}: {}", runId, stream, e.getMessage(), e);
             checkpointRepository.markSyncFailed(runId, e.getMessage());
