@@ -1,11 +1,13 @@
 package dev.ingest.app;
 
 import dev.ingest.app.fixture.RdwFixtureServer;
+import dev.ingest.connector.ecb.EcbXmlConnector;
 import dev.ingest.connector.rdw.RdwConnectorConfig;
 import dev.ingest.connector.rdw.RdwVehicleConnector;
 import dev.ingest.core.ConnectorRegistry;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Path;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -16,7 +18,7 @@ import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 
 /**
- * Wires connectors into {@link ConnectorRegistry} and configures Kafka topics and the batch listener container.
+ * Wires connectors (`rdw` and `ecb-xml`) into {@link ConnectorRegistry} and configures Kafka topics.
  */
 @Configuration
 public class PipelineConfiguration {
@@ -24,6 +26,14 @@ public class PipelineConfiguration {
     @Bean
     public NewTopic rdwVehiclesTopic() {
         return TopicBuilder.name("ingest.raw.rdw_vehicles")
+                .partitions(1)
+                .replicas(1)
+                .build();
+    }
+
+    @Bean
+    public NewTopic ecbExchangeRatesTopic() {
+        return TopicBuilder.name("ingest.raw.ecb_exchange_rates")
                 .partitions(1)
                 .replicas(1)
                 .build();
@@ -48,11 +58,13 @@ public class PipelineConfiguration {
     @Bean
     public ConnectorRegistry connectorRegistry(
             @Value("${ingest.rdw.base-url:https://opendata.rdw.nl}") String rdwBaseUrl,
+            @Value("${ingest.ecb.xml-path:/tmp/eurofxref-hist.xml}") String ecbXmlPath,
             @Value("${ingest.fixture.enabled:false}") boolean fixtureEnabled,
             @Value("${ingest.fixture.port:18089}") int fixturePort) {
         ConnectorRegistry registry = new ConnectorRegistry();
         String effectiveUrl = fixtureEnabled ? ("http://127.0.0.1:" + fixturePort) : rdwBaseUrl;
         registry.register(new RdwVehicleConnector(RdwConnectorConfig.defaults(URI.create(effectiveUrl))));
+        registry.register(new EcbXmlConnector(Path.of(ecbXmlPath)));
         return registry;
     }
 
