@@ -1,6 +1,8 @@
 # Resumable Ingestion Pipeline (`ingest-pipeline`)
 
-A Java 21 / Spring Boot 3.3 data ingestion framework (`SourceConnector` SPI) that extracts from paginated HTTP APIs (Dutch RDW Socrata SODA) and XML feeds (European Central Bank FX Reference Rates), buffers through Apache Kafka (`acks=all`, idempotent producer), and loads into PostgreSQL 16 with **transactional offset tracking**, **idempotent source-hash upserts**, **online schema-drift evolution**, **dead-letter routing**, and **crash recovery (`kill -9`)**.
+![CI](../../actions/workflows/ci.yml/badge.svg)
+
+A Java 21 / Spring Boot 3.3 data ingestion framework (`SourceConnector` SPI) that extracts from paginated HTTP APIs (Dutch RDW Socrata SODA) and XML feeds (European Central Bank FX Reference Rates), buffers through Apache Kafka (`acks=all`, idempotent producer), and loads into PostgreSQL 16 with **transactional offset tracking**, **idempotent source-hash upserts**, **online schema-drift evolution**, **dead-letter routing**, and **resumable crash recovery** (verified by a 10-run fault-injection integration test and an OS-level `SIGKILL` script).
 
 ---
 
@@ -70,7 +72,7 @@ mvn clean verify
 | Verification Gate | Test / Script | Verified Behavior |
 | :--- | :--- | :--- |
 | **Idempotent 200k Replay (M2)** | `M2TransportAndLoaderIT` | Loading 200,000 records twice (`400,000` Kafka messages) produces `200,000` rows, identical MD5 dataset checksums, and `0` redundant row updates (`MAX(loaded_at)` unchanged). |
-| **Mid-Sync Crash Recovery (M3)** | `M3CrashRecoveryIT` & `scripts/kill-and-resume.sh` | **0 duplicates and 0 gaps across 10 consecutive runs** with multiple mid-sync crashes injected after Kafka broker acks and before checkpoint commit. |
+| **Mid-Sync Crash Recovery (M3)** | `M3CrashRecoveryIT` & `scripts/kill-and-resume.sh` | **0 lost rows and an identical MD5 content checksum across 10 consecutive runs** (2 injected crashes per run between Kafka ack and checkpoint commit), with replayed pages absorbed idempotently (`WHERE source_hash IS DISTINCT`). Also includes `scripts/kill-and-resume.sh` for OS-level `SIGKILL` testing. |
 | **Online Schema Drift & DLQ (M4)** | `M4SchemaDriftAndDlqIT` | Executes `ADD COLUMN` and `INTEGER -> BIGINT -> NUMERIC` widening (with cache rollback eviction) while routing incompatible types and corrupt JSON to `dead_letters` (deduplicated by `(topic, partition, offset)`) and `ingest.dlq`. |
 | **Constant-Heap XML & E2E Load (M5)** | `EcbXmlConnectorTest` & `M5EcbEndToEndIT` | Streams a **155 MB** (`3,200,000` records) synthetic ECB XML file inside a **`-Xmx64m`** JVM without `OutOfMemoryError`, and loads `ecb_exchange_rates` end-to-end through Kafka into PostgreSQL. |
 
@@ -100,6 +102,15 @@ Reproduced via `./scripts/benchmark.sh` on:
 | **`500`** | `10,000` records | **`14164` records/sec** |
 | **`1000`** | `10,000` records | **`15337` records/sec** |
 | **`5000`** | `10,000` records | **`18450` records/sec** |
+
+---
+
+
+### 4.3 Benchmark & Operational Notes
+- Figures above are single-run measurements on the stated WSL2 laptop environment using the local deterministic HTTP fixture (`RdwFixtureServer`) rather than the live internet RDW endpoint.
+- The batch-size benchmark invokes `PostgresTransactionalWriter` directly to isolate PostgreSQL JDBC batch upsert scaling from Kafka poll latency.
+- `dead_letters` in PostgreSQL is the transactional source of truth for rejected records; publishing to `ingest.dlq` is best-effort after transaction commit.
+- `sync_runs.records_loaded` and `records_dead` are approximate per-run counters attributed to the latest run for that stream.
 
 ---
 
