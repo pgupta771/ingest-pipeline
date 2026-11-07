@@ -2,15 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [ main, "feat/**" ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
+
+env:
+  DOCKER_API_VERSION: "1.44"
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Configure Docker API 1.44 for Testcontainers
+        run: printf "api.version=1.44\n" > ~/.docker-java.properties
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -18,4 +23,4 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
       - name: Build and Verify (Unit + Testcontainers IT)
-        run: mvn -B clean verify
+        run: mvn -B clean verify -Dapi.version=1.44
